@@ -1,0 +1,71 @@
+@router.post("/operation", status_code=status.HTTP_201_CREATED)
+def create_operations(
+    operation_data: schemas.TenantOperation,
+    db: Session = Depends(get_db),
+    current_user: int = Depends(oauth2.get_current_user)
+):
+    try:
+        # <---------- 1. Validate user, tenant, role ---------->
+        user.get_user_status(current_user)
+        tenant.user_role_admin(current_user)
+
+        requested_tenant = backtable.getTenantByCode(operation_data.tenant_code, db)
+        if operation_data.tenant_code != current_user.tenant.tenant_code:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not Authorised to create Operation for {requested_tenant.tenant_name}"
+            )
+
+        # <---------- 2. Remove duplicates from input ---------->
+        unique_operations = declare.remove_duplicates(operation_data.operation)
+        # unique_operations['operations'] = unique_operations['operations'].str.strip().str.lower()
+
+        # <---------- 3. Fetch existing operations from DB ---------->
+        existing_ops = db.query(models.Operation.operation_name).filter(
+            models.Operation.tenant_id == current_user.tenant_id
+        ).all()
+
+        # Convert DB results to DataFrame (normalize to lowercase for comparison)
+        df_existing = pd.DataFrame(existing_ops, columns=["operation_name"])
+        df_existing['operation_name'] = df_existing['operation_name'].str.strip().str.lower()
+
+        # <---------- 4. Filter only new operations ---------->
+        df_unique = unique_operations[~unique_operations['operations'].isin(df_existing['operation_name'])].copy()
+
+        if df_unique.empty:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{unique_operations['operations'].tolist()} already present, No new operations to add"
+            )
+
+        # <---------- 5. Add metadata columns ---------->
+        df_unique['tenant_id'] = requested_tenant.id
+        df_unique['created_by'] = current_user.id
+        df_unique['updated_by'] = current_user.id
+        df_unique.rename(columns={'operations': 'operation_name'}, inplace=True)
+
+        # <---------- 6. Bulk insert ---------->
+        db.bulk_insert_mappings(
+            models.Operation,
+            df_unique.to_dict(orient='records')
+        )
+        db.commit()
+
+        return {
+            "status": "success",
+            "inserted_operations": df_unique['operation_name'].tolist()
+        }
+
+    except HTTPException as he:
+        raise he
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}"
+        )
+# Operation Start  Ends <---------------------------------( rev 0.0 dt 30.7.2025 by Rajesh Bondgilwar)

@@ -1,0 +1,386 @@
+from typing import List
+from fastapi import status,HTTPException,Depends,APIRouter
+import pandas as pd
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+
+
+from .. import schemas,oauth2,models
+from ..function import admin, backtable,tenant,fetch_details,user,shifts_fn,declare
+from .. import utls
+from ..database import get_db
+
+
+router = APIRouter(
+  prefix="/declaration/v1",tags=['setup']
+)
+
+# Operation Start here (created on 29.7.2025 by Rajesh Bondgilwar) --------------------------->
+@router.post("/operation", status_code=status.HTTP_201_CREATED)
+def create_operations(
+    operation_data: schemas.TenantOperationBulk,
+    db: Session = Depends(get_db),
+    current_user: int = Depends(oauth2.get_current_user)
+):
+    try:
+        # 1. Validate user, tenant, role
+        user.get_user_status(current_user)
+        tenant.user_role_admin(current_user)
+
+        requested_tenant = backtable.getTenantByCode(operation_data.tenant_code, db)
+        if operation_data.tenant_code != current_user.tenant.tenant_code:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"User not authorized to create operations for {requested_tenant.tenant_name}"
+            )
+
+        all_new_operations = []
+
+        for dept in operation_data.departments:
+            # Validate department
+            department = db.query(models.Department).filter(
+                models.Department.id == dept.department_id,
+                models.Department.tenant_id == requested_tenant.id
+            ).first()
+
+            if not department:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Department {dept.department_id} not found for this tenant"
+                )
+
+            # Remove duplicates from input
+            unique_operations = declare.remove_duplicates(dept.operation)
+
+            # Fetch existing operations for this department
+            existing_ops = db.query(models.Operation.operation_name).filter(
+                models.Operation.tenant_id == requested_tenant.id,
+                models.Operation.department_id == dept.department_id
+            ).all()
+
+            df_existing = pd.DataFrame(existing_ops, columns=["operation_name"])
+            df_existing["operation_name"] = df_existing["operation_name"].str.strip().str.lower()
+
+            # Filter only new operations
+            df_unique = unique_operations[~unique_operations["operations"].isin(df_existing["operation_name"])].copy()
+
+            if df_unique.empty:
+                continue  # Skip if no new operations for this department
+
+            # Add metadata
+            df_unique["tenant_id"] = requested_tenant.id
+            df_unique["department_id"] = dept.department_id
+            df_unique["created_by"] = current_user.id
+            df_unique["updated_by"] = current_user.id
+            df_unique.rename(columns={"operations": "operation_name"}, inplace=True)
+
+            all_new_operations.extend(df_unique.to_dict(orient="records"))
+
+        if not all_new_operations:
+            raise HTTPException(
+                status_code=400,
+                detail="No new operations to add; all already exist"
+            )
+
+        # Bulk insert
+        db.bulk_insert_mappings(models.Operation, all_new_operations)
+        db.commit()
+
+        return {
+            "status": "success",
+            "inserted_operations": [op["operation_name"] for op in all_new_operations]
+        }
+
+    except HTTPException as he:
+        raise he
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}"
+        )
+
+# Defect Start here (created on 30.7.2025 by Rajesh Bondgilwar) --------------------------->
+@router.post("/defect", status_code=status.HTTP_201_CREATED)
+def create_defects(
+    defect_data: schemas.TenantDefect,
+    db: Session = Depends(get_db),
+    current_user: int = Depends(oauth2.get_current_user)
+):
+    try:
+        # 1. Validate user, tenant, role
+        user.get_user_status(current_user)
+        tenant.user_role_admin(current_user)
+
+        requested_tenant = backtable.getTenantByCode(defect_data.tenant_code, db)
+        if defect_data.tenant_code != current_user.tenant.tenant_code:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not Authorised to create Defect for {requested_tenant.tenant_name}"
+            )
+
+        # 2. Remove duplicates from input
+        unique_defects = declare.remove_duplicates(defect_data.defect)
+        unique_defects['operations'] = unique_defects['operations'].str.strip().str.lower()
+
+        # 3. Fetch existing defects from DB (FIXED)
+        existing_defects = db.query(models.Defect.defect_name).filter(
+            models.Defect.tenant_id == current_user.tenant_id
+        ).all()
+
+
+        # Convert DB results to DataFrame (normalize to lowercase for comparison)
+        df_existing = pd.DataFrame(existing_defects, columns=["defect_name"])
+        df_existing['defect_name'] = df_existing['defect_name'].str.strip().str.lower()
+
+     
+
+        # 4. Filter only new defects
+        df_unique = unique_defects[~unique_defects['operations'].isin(df_existing['defect_name'])].copy()
+
+        if df_unique.empty:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{unique_defects['operations'].tolist()} already present, No new defects to add"
+            )
+
+        # 5. Add metadata columns
+        df_unique['tenant_id'] = requested_tenant.id
+        df_unique['created_by'] = current_user.id
+        df_unique['updated_by'] = current_user.id
+        df_unique.rename(columns={'operations': 'defect_name'}, inplace=True)
+
+        # 6. Bulk insert
+        db.bulk_insert_mappings(
+            models.Defect,
+            df_unique.to_dict(orient='records')
+        )
+        db.commit()
+
+        return {
+            "message": "success",
+            "inserted_defects": df_unique['defect_name'].tolist()
+        }
+
+    except HTTPException as he:
+        raise he
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}"
+        )
+
+# Defect Ends <---------------------------------( rev 0.0 dt 30.7.2025 by Rajesh Bondgilwar)
+
+# DownTime Start here (created on 30.7.2025 by Rajesh Bondgilwar) --------------------------->
+@router.post('/down-time', status_code=status.HTTP_201_CREATED)
+def create_down_time(
+    downtime_data: schemas.TenantDownTime,
+    db: Session = Depends(get_db),
+    current_user: int = Depends(oauth2.get_current_user)
+):
+    try:
+        # 1. Validate user, tenant, role
+        user.get_user_status(current_user)
+        tenant.user_role_admin(current_user)
+        requested_tenant = backtable.getTenantByCode(downtime_data.tenant_code, db)
+
+        if downtime_data.tenant_code != current_user.tenant.tenant_code:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"User not Authorised to create Downtime for {requested_tenant.tenant_name}"
+            )
+
+        # 2. Remove duplicates and normalize
+        unique_downtime = declare.remove_duplicates(downtime_data.down_time)
+
+        # 3. Fetch existing downtime
+        existing_down_time = db.query(models.DownTime.downtime_name).filter(
+            models.DownTime.tenant_id == current_user.tenant_id
+        ).all()
+
+        df_existing = pd.DataFrame(existing_down_time, columns=['downtime_name'])
+        if not df_existing.empty:
+            df_existing['downtime_name'] = df_existing['downtime_name'].str.strip().str.lower()
+
+        # 4. Filter only new downtime
+        df_unique = unique_downtime[~unique_downtime['operations'].isin(df_existing['downtime_name'])].copy()
+        if df_unique.empty:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{unique_downtime['operations'].tolist()} already present, No new downtime to add"
+            )
+
+        # 5. Add metadata
+        df_unique['tenant_id'] = requested_tenant.id
+        df_unique['created_by'] = current_user.id
+        df_unique['updated_by'] = current_user.id
+        df_unique.rename(columns={'operations': 'downtime_name'}, inplace=True)
+
+        # 6. Bulk insert
+        db.bulk_insert_mappings(models.DownTime, df_unique.to_dict(orient="records"))
+        db.commit()
+
+        return {"status": "success", "downtime_inserted": df_unique['downtime_name'].tolist()}
+
+    except HTTPException as he:
+        raise he
+    except SQLAlchemyError as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+# Downtine  Ends <---------------------------------( rev 0.0 dt 30.7.2025 by Rajesh Bondgilwar)
+
+# Department Start here (created on 29.7.2025 by Rajesh Bondgilwar) --------------------------->
+@router.post("/department", status_code=status.HTTP_201_CREATED)
+def create_department(
+    payload: schemas.TenantDepartment,
+    db: Session = Depends(get_db),
+    current_user: int = Depends(oauth2.get_current_user)
+):
+    try:
+        # <---------- 1. Validate user, tenant, role ---------->
+        user.get_user_status(current_user)
+        tenant.user_role_admin(current_user)
+        requested_tenant = backtable.getTenantByCode(payload.tenant_code, db)
+        if payload.tenant_code != current_user.tenant.tenant_code:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not Authorised to create Operation for {requested_tenant.tenant_name}"
+            )
+        # <---------- 2. Remove duplicates from input ---------->
+        unique_operations = declare.remove_duplicates(payload.department)
+        # print(unique_operations)
+
+           # <---------- 3. Fetch existing operations from DB ---------->
+        existing_dept = db.query(models.Department.department_name).filter(
+            models.Department.tenant_id == current_user.tenant_id
+        ).all()
+        # Convert DB results to DataFrame (normalize to lowercase for comparison)
+        df_existing = pd.DataFrame(existing_dept, columns=["department_name"])
+        df_existing['department_name'] = df_existing['department_name'].str.strip().str.lower()
+
+        # <---------- 4. Filter only new operations ---------->
+        df_unique = unique_operations[~unique_operations['operations'].isin(df_existing['department_name'])].copy()
+        if df_unique.empty:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{unique_operations['operations'].tolist()} already present, No new operations to add"
+            )
+
+        # <---------- 5. Add metadata ---------->
+        df_unique['tenant_id'] = requested_tenant.id
+        df_unique['created_by'] = current_user.id
+        df_unique['updated_by'] = current_user.id
+        df_unique.rename(columns={'operations': 'department_name'}, inplace=True)
+
+        # <---------- 6. Bulk insert ---------->
+        db.bulk_insert_mappings(models.Department, df_unique.to_dict(orient="records"))
+        db.commit()
+
+        return {
+            "message": "success",
+            "inserted_operations": df_unique['department_name'].tolist()}
+
+    except HTTPException as he:
+        raise he
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"SQL Server Error: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal Server Error: {str(e)}"
+        )
+
+# Department Ends here <---------------------------------( rev 0.0 dt 29.7.2025 by Rajesh Bondgilwar)
+
+
+# Edit Department name Start here (created on 29.7.2025 by Rajesh Bondgilwar) --------------------------->
+@router.patch("/department-edit", status_code=status.HTTP_200_OK)
+def edit_department(
+    payload: schemas.EditTenantDepartment,
+    db: Session = Depends(get_db),
+    current_user: int = Depends(oauth2.get_current_user)
+):
+    try:
+        # 1. Validate user, tenant, role
+        user.get_user_status(current_user)
+        tenant.user_role_admin(current_user)
+        requested_tenant = backtable.getTenantByCode(payload.tenant_code, db)
+
+        if payload.tenant_code != current_user.tenant.tenant_code:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"User not authorized to edit department for {requested_tenant.tenant_name}"
+            )
+
+        # 2. Validate new department name
+        if not payload.new_department_name or payload.new_department_name.strip() in ["-", ""]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="New department name is invalid"
+            )
+
+        new_dept_name = payload.new_department_name.strip().lower()
+
+        # 3. Find the department to edit
+        department_row_edit = db.query(models.Department).filter(
+            models.Department.department_name == payload.department_name.strip().lower(),
+            models.Department.tenant_id == current_user.tenant_id
+        ).first()
+
+        if not department_row_edit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Department '{payload.department_name}' not found"
+            )
+
+        # 4. Check if the new name already exists
+        existing_dept = db.query(models.Department).filter(
+            models.Department.department_name == new_dept_name,
+            models.Department.tenant_id == current_user.tenant_id
+        ).first()
+
+        if existing_dept:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Department '{payload.new_department_name}' already exists"
+            )
+
+        # 5. Update department name
+        department_row_edit.department_name = new_dept_name
+        department_row_edit.updated_by = current_user.id
+        db.commit()
+
+        return {
+            "message": "success",
+            "updated_department": new_dept_name
+        }
+
+    except HTTPException as he:
+        raise he
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"SQL Server Error: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal Server Error: {str(e)}"
+        )
+
+# Edit Department name Ends here <---------------------------------( rev 0.0 dt 29.7.2025 by Rajesh Bondgilwar)
