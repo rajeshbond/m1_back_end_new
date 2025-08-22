@@ -16,4 +16,4 @@ def get_user_status(current_user):
       detail=f"user not verifed, Please contact your Admin {current_user.tenant.tenant_name}"
     )
 
-58
+

@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 # from app.routers import tenant
 from . import models
 from .database import engine
-from .routers import (fadmin,auth,admin,tenant,tenant_user,shifts,declaration,product,inspection)
+from .routers import (fadmin,auth,admin,tenant,tenant_user,shifts,declaration,product,inspection,inspection_result,mold,machine,mold_machine)
 from .config import settings
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
@@ -42,6 +42,10 @@ app.include_router(shifts.router)
 app.include_router(declaration.router)
 app.include_router(product.router)
 app.include_router(inspection.router)
+app.include_router(inspection_result.router)
+app.include_router(mold.router)
+app.include_router(machine.router)
+app.include_router(mold_machine.router)
 
 
 # ---------------Ends-----------------------------

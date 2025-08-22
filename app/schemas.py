@@ -2,9 +2,12 @@
 from datetime import datetime , date, time
 from operator import le
 from pydantic import BaseModel, EmailStr, Field , conint
-from typing import List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 from app.models import *
 from pydantic.types import conlist
+from pydantic import BaseModel, Field, field_validator
+from zoneinfo import ZoneInfo
+from app.function import timeapp
 
 class RoleCreate(BaseModel):
     user_role:str
@@ -354,3 +357,126 @@ class ProductInspectionUpdate(BaseModel):
     upper_limit: Optional[float] = None
     unit: Optional[str] = None
     gauge_name: Optional[str] = None
+
+class ProductInspectionResultBase(BaseModel):
+    inspection_id: int
+    inspector_id: Optional[int] = None
+    shift_timingid: Optional[int] = None
+    measured_value: Optional[float] = None
+    go_no_go: Optional[bool] 
+    inspection_date: date = Field(default_factory=date.today)
+    inspection_hour: Optional[int] = Field(default_factory=lambda: datetime.now(tz=ZoneInfo("Asia/Kolkata")).hour, ge=0, le=23)
+
+
+
+
+# class ProductInspectionResultBase(BaseModel):
+#     inspection_id: int
+#     inspector_id: Optional[int] = None
+#     shift_timingid: Optional[int] = None
+#     measured_value: Optional[float] = None
+#     go_no_go: Optional[bool] = None
+#     inspection_date: date
+#     inspection_hour: Optional[int] = datetime.now(tz=ZoneInfo("Asia/Kolkata")).hour
+
+class ProductInspectionResultCreate(ProductInspectionResultBase):
+    pass
+
+class ProductInspectionResultUpdate(BaseModel):
+    inspector_id: Optional[int] = None
+    shift_timingid: Optional[int] = None
+    measured_value: Optional[float] = None
+    go_no_go: Optional[bool] = None
+    inspection_date: Optional[date] = None
+    inspection_hour: Optional[int] = Field(None, ge=0, le=23)
+
+class ProductInspectionResultResponse(ProductInspectionResultBase):
+    id: int
+    created_by: Optional[int]
+    updated_by: Optional[int]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {
+    "from_attributes": True
+    }
+
+class MoldBase(BaseModel):
+    mold_no: str
+    cavities: int = Field(..., ge=1)
+    description: Optional[str] = None
+    special_notes: Optional[Dict[str, Any]] = None
+
+class MoldCreate(MoldBase):
+    pass
+
+class MoldUpdate(MoldBase):
+    pass
+
+class MoldCreateResponse(BaseModel):
+    message: str
+    mold: MoldBase
+
+class MachineBase(BaseModel):
+    machine_code: str
+    description: Optional[str] = None
+    capacity: Optional[str] = None
+    special_notes: Optional[Any] = None  # JSONB can be dict/list
+
+class MachineCreate(MachineBase):
+    pass
+    # tenant_id: int
+    # created_by: Optional[int] = None
+
+class MachineUpdate(MachineBase):
+    updated_by: Optional[int] = None
+
+class MachineOut(MachineBase):
+    id: int
+    tenant: Tenantout
+    created_by: Optional[int]
+    updated_by: Optional[int]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {
+    "from_attributes": True
+    }
+
+
+class ProductMoldBase(BaseModel):
+    product_name: str
+    mold_no: str
+
+class ProductMoldCreate(ProductMoldBase):
+    pass
+
+class ProductMoldUpdate(ProductMoldBase):
+    pass
+
+class ProductMoldOut(ProductMoldBase):
+    id: int
+    model_config = {
+    "from_attributes": True
+    }
+
+class MoldMachineBase(BaseModel):
+    mold_no: str
+    machine_code: str
+
+class MoldMachineCreate(MoldMachineBase):
+    pass
+
+class MoldMachineUpdate(MoldMachineBase):
+    pass
+
+class MoldMachineOut(BaseModel):
+    id: int
+    mold_id: int
+    machine_id: int
+    created_by: int
+    updated_by: int
+
+    model_config = {
+    "from_attributes": True
+    }

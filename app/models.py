@@ -127,7 +127,9 @@ class ShiftTiming(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     tenant_shift = relationship("TenantShift", back_populates="timings")
-    
+
+
+    inspection_result = relationship("ProductInspectionResult", back_populates="shifts_timings", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint('tenant_shift_id', 'weekday', name='uix_shift_timing'),
@@ -435,15 +437,14 @@ class ProductInspectionResult(Base):
     id = Column(Integer, primary_key=True, index=True)
     inspection_id = Column(Integer, ForeignKey('product_inspection.id', ondelete='CASCADE'), nullable=False)
     inspector_id = Column(Integer, ForeignKey('user.id', ondelete='SET NULL'), nullable=True)
-    
+    shift_timingid = Column(Integer, ForeignKey('shift_timing.id', ondelete='SET NULL'), nullable=True)
 
-    # For dimensional inspection
     measured_value = Column(Float, nullable=True)
-
-    # For gauge inspection
     go_no_go = Column(Boolean, nullable=True)
 
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # New fields for date + hour tracking
+    inspection_date = Column(Date, nullable=False)  # only the date
+    inspection_hour = Column(Integer, nullable=False)  # 0–23
 
     created_by = Column(Integer)
     updated_by = Column(Integer)
@@ -451,11 +452,43 @@ class ProductInspectionResult(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     inspection = relationship("ProductInspection", back_populates="inspection_result")
-    users = relationship("User",back_populates="inspection_result")
+    users = relationship("User", back_populates="inspection_result")
+    shifts_timings = relationship("ShiftTiming", back_populates="inspection_result")
 
     __table_args__ = (
-        UniqueConstraint('inspection_id', 'timestamp', name='uix_inspection_timestamp'),
+        UniqueConstraint('shift_timingid', 'inspection_date', 'inspection_hour', name='uix_shift_hourly_unique'),
     )
+
+
+# class ProductInspectionResult(Base):
+#     __tablename__ = "product_inspection_result"
+
+#     id = Column(Integer, primary_key=True, index=True)
+#     inspection_id = Column(Integer, ForeignKey('product_inspection.id', ondelete='CASCADE'), nullable=False)
+#     inspector_id = Column(Integer, ForeignKey('user.id', ondelete='SET NULL'), nullable=True)
+#     shift_timingid = Column(Integer, ForeignKey('shift_timing.id', ondelete='SET NULL'), nullable=True)
+    
+
+#     # For dimensional inspection
+#     measured_value = Column(Float, nullable=True)
+
+#     # For gauge inspection
+#     go_no_go = Column(Boolean, nullable=True)
+
+#     # timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+#     created_by = Column(Integer)
+#     updated_by = Column(Integer)
+#     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+#     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+#     inspection = relationship("ProductInspection", back_populates="inspection_result")
+#     users = relationship("User",back_populates="inspection_result")
+#     shifts_timings = relationship("ShiftTiming",back_populates="inspection_result")
+
+#     __table_args__ = (
+#         UniqueConstraint('inspection_id', 'timestamp', name='uix_inspection_timestamp'),
+#     )
 
 
 
@@ -470,14 +503,16 @@ class Mold(Base):
     tenant_id = Column(Integer, ForeignKey('tenant.id', ondelete='CASCADE'), nullable=False)
     mold_no = Column(String, nullable=False)
     description = Column(String, nullable=True)
+    cavities = Column(Integer, nullable=False)
+    special_notes = Column(JSONB, nullable=True)
+    created_by = Column(Integer)
+    updated_by = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     tenant = relationship("Tenant", back_populates="molds")
     product_molds = relationship("ProductMold", back_populates="mold", cascade="all, delete-orphan")
     mold_machines = relationship("MoldMachine", back_populates="mold", cascade="all, delete-orphan")
-
-
-
-  
 
     __table_args__ = (
         UniqueConstraint('tenant_id', 'mold_no', name='uix_tenant_mold_no'),
@@ -491,6 +526,10 @@ class ProductMold(Base):
     id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey('product.id', ondelete='CASCADE'), nullable=False)
     mold_id = Column(Integer, ForeignKey('mold.id', ondelete='CASCADE'), nullable=False)
+    created_by = Column(Integer)
+    updated_by = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     products = relationship("Product", back_populates="product_molds")
     mold = relationship("Mold", back_populates="product_molds")
@@ -506,8 +545,9 @@ class Machine(Base):
     tenant_id = Column(Integer, ForeignKey('tenant.id', ondelete='CASCADE'), nullable=False)
     machine_code = Column(String, nullable=False)  # Unique machine identifier for a tenant
     description = Column(String, nullable=True)
-    capacity = Column(String, nullable=True)  # e.g., 120T, 200T (optional)
-
+    capacity = Column(String, nullable=True)
+      # e.g., 120T, 200T (optional)
+    special_notes = Column(JSONB, nullable=True)
     created_by = Column(Integer)
     updated_by = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -535,6 +575,10 @@ class MoldMachine(Base):
     # Relationships
     mold = relationship("Mold", back_populates="mold_machines")
     machines = relationship("Machine", back_populates="mold_machines")
+    created_by = Column(Integer)
+    updated_by = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     __table_args__ = (
         UniqueConstraint('mold_id', 'machine_id', name='uix_mold_machine'),
