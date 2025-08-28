@@ -19,7 +19,6 @@ router = APIRouter(
     tags=["Production_Log"]
 )
 
-
 @router.post("/production-log/")
 def create_production_log(
     payload: schemas.ProductionLogCreate,
@@ -59,7 +58,22 @@ def create_production_log(
         raise HTTPException(status_code=400, detail="Cannot enter data for an advance shift")
 
     # --------------------------------------------------
-    # 3. Prevent duplicate entry per tenant/date/shift
+    # 3. Validate Mold-Machine mapping belongs to tenant
+    # --------------------------------------------------
+    mold_machine = db.query(models.MoldMachine) \
+        .join(models.Mold, models.Mold.id == models.MoldMachine.mold_id) \
+        .join(models.Machine, models.Machine.id == models.MoldMachine.machine_id) \
+        .filter(
+            models.MoldMachine.id == payload.mold_machine_id,
+            models.Mold.tenant_id == payload.tenant_id,
+            models.Machine.tenant_id == payload.tenant_id
+        ).first()
+
+    if not mold_machine:
+        raise HTTPException(status_code=404, detail="Invalid Mold-Machine mapping for this tenant")
+
+    # --------------------------------------------------
+    # 4. Prevent duplicate entry per tenant/date/shift/mold_machine
     # --------------------------------------------------
     existing_log = db.query(models.ProductionLog).filter(
         and_(
@@ -71,10 +85,13 @@ def create_production_log(
     ).first()
 
     if existing_log:
-        raise HTTPException(status_code=400, detail="Duplicate entry already exists for this shift/date")
+        raise HTTPException(
+            status_code=400,
+            detail="Duplicate entry already exists for this tenant/date/shift/mold-machine"
+        )
 
     # --------------------------------------------------
-    # 4. Insert Production Log
+    # 5. Insert Production Log
     # --------------------------------------------------
     new_log = models.ProductionLog(
         tenant_id=payload.tenant_id,
@@ -90,12 +107,12 @@ def create_production_log(
     db.refresh(new_log)
 
     # --------------------------------------------------
-    # 5. Efficiency calculation
+    # 6. Efficiency calculation
     # --------------------------------------------------
     efficiency = (payload.actual / payload.target * 100) if payload.target else 0
 
     # --------------------------------------------------
-    # 6. Bulk Insert Downtime & Rejections (only if eff < 95%)
+    # 7. Bulk Insert Downtime & Rejections (only if eff < 95%)
     # --------------------------------------------------
     if efficiency < 95:
         # ---- Downtimes ----
