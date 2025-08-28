@@ -404,6 +404,7 @@ class ProductInspectionResultResponse(ProductInspectionResultBase):
 class MoldBase(BaseModel):
     mold_no: str
     cavities: int = Field(..., ge=1)
+    target_shots: int = Field(..., ge=1)
     description: Optional[str] = None
     special_notes: Optional[Dict[str, Any]] = None
 
@@ -476,6 +477,39 @@ class MoldMachineOut(BaseModel):
     machine_id: int
     created_by: int
     updated_by: int
+
+    model_config = {
+    "from_attributes": True
+    }
+
+
+# ---- Downtime & Defect Entries ----
+class DowntimeEntry(BaseModel):
+    reason_id: int
+    duration: float
+
+
+class DefectEntry(BaseModel):
+    defect_type_id: int
+    quantity: int
+
+
+class ProductionLogBase(BaseModel):
+    tenant_id: int
+    shift_id: int
+    log_date: date = Field(..., description="Production log date")
+    mold_id: int
+    target_qty: int
+    actual_qty: int
+
+
+class ProductionLogCreate(ProductionLogBase):
+    downtime_entries: Optional[List[DowntimeEntry]] = Field(default_factory=list)
+    defect_entries: Optional[List[DefectEntry]] = Field(default_factory=list)
+
+
+class ProductionLogResponse(ProductionLogBase):
+    id: int
 
     model_config = {
     "from_attributes": True

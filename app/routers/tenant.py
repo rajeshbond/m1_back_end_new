@@ -121,53 +121,41 @@ def create_multiple_shifts(
     current_user: int = Depends(oauth2.get_current_user)
 ):
     try:
-        # Validate user
+        # ✅ Validate user
         user.get_user_status(current_user)
         tenant.user_role_admin(current_user)
 
-        # Validate tenant
+        # ✅ Validate tenant
         user_tenant = db.query(models.Tenant).filter(
             models.Tenant.tenant_code == current_user.tenant.tenant_code
         ).first()
         if not user_tenant:
             raise HTTPException(403, detail="You are not authorized to create shifts for this tenant")
 
-        created_shifts = []
-        skipped_shifts = []
-
         for shift in payload:
             if not shift.timings:
                 raise HTTPException(400, "Shift timings must be provided")
 
-            # Check if shift already exists
+            # ✅ Check if shift already exists
             exists_shift = db.query(models.TenantShift).filter_by(
                 tenant_id=user_tenant.id, shift_name=shift.shift_name
             ).first()
-
             if exists_shift:
-                skipped_shifts.append(shift.shift_name)
-                continue  # Skip if shift exists
+                raise HTTPException(
+                    409,
+                    f"Shift '{shift.shift_name}' already exists for tenant '{user_tenant.tenant_name}'"
+                )
 
-            # Auto-assign weekdays if missing
-            for idx, t in enumerate(shift.timings):
-                if t.weekday is None:
-                    t.weekday = (idx % 7) + 1  # 1–7 (Monday–Sunday)
-
-            # Validate no duplicate weekdays in same shift
-            weekdays = [t.weekday for t in shift.timings]
-            if len(weekdays) != len(set(weekdays)):
-                raise HTTPException(400, f"Duplicate weekday found in shift '{shift.shift_name}'")
-
-            # Check overlaps in the same shift
+            # ✅ Internal overlaps
             shifts_fn.check_overlap(shift.timings)
 
-            # Calculate new shift hours
+            # ✅ Calculate total hours for new shift
             new_hours = {}
             for t in shift.timings:
-                dur = shifts_fn.calculate_duration(t.shift_start.strftime("%H:%M"), t.shift_end.strftime("%H:%M"))
+                dur = shifts_fn.calculate_duration(t.shift_start, t.shift_end)
                 new_hours[t.weekday] = new_hours.get(t.weekday, 0) + dur
 
-            # Get existing shift durations for tenant
+            # ✅ Existing hours from DB
             existing_hours = {}
             existing_timings = (
                 db.query(models.ShiftTiming)
@@ -176,10 +164,10 @@ def create_multiple_shifts(
                 .all()
             )
             for s in existing_timings:
-                dur = shifts_fn.calculate_duration(s.shift_start.strftime("%H:%M"), s.shift_end.strftime("%H:%M"))
+                dur = shifts_fn.calculate_duration(s.shift_start, s.shift_end)
                 existing_hours[s.weekday] = existing_hours.get(s.weekday, 0) + dur
 
-            # Validate total hours <= 24
+            # ✅ Validate total <= 24
             for weekday, hours in new_hours.items():
                 total = existing_hours.get(weekday, 0) + hours
                 if total > 24:
@@ -188,7 +176,7 @@ def create_multiple_shifts(
                         f"Total shift duration exceeds 24 hours on weekday {weekday} for tenant '{user_tenant.tenant_name}'"
                     )
 
-            # Create new shift
+            # ✅ Create TenantShift
             new_shift = models.TenantShift(
                 tenant_id=user_tenant.id,
                 shift_name=shift.shift_name,
@@ -198,7 +186,7 @@ def create_multiple_shifts(
             db.add(new_shift)
             db.flush()
 
-            # Add shift timings
+            # ✅ Add timings
             for t in shift.timings:
                 new_timing = models.ShiftTiming(
                     tenant_shift_id=new_shift.id,
@@ -210,22 +198,22 @@ def create_multiple_shifts(
                 )
                 db.add(new_timing)
 
-            created_shifts.append(shift.shift_name)
-
         db.commit()
 
-        return {
-            "message": "Shifts processed successfully",
-            "created": created_shifts,
-            "skipped": skipped_shifts
-        }
+        return {"message": "Shifts created successfully"}
 
     except HTTPException as he:
         raise he
     except SQLAlchemyError as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"SQL Server Error: {str(e)}")
+        raise HTTPException(500, f"SQL Server Error: {str(e)}")
     except Exception as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal Server Error: {str(e)}")
+        raise HTTPException(500, f"Internal Server Error: {str(e)}")
+
+
+
+
+
+
 
 
 # @router.post("/bulk", status_code=status.HTTP_201_CREATED)
@@ -264,9 +252,9 @@ def create_multiple_shifts(
 #                 )
 
 #             # 🚫 Validate no duplicate weekdays
-#             weekdays = [t.weekday for t in shift.timings]
-#             if len(weekdays) != len(set(weekdays)):
-#                 raise HTTPException(400, f"Duplicate weekday found in shift '{shift.shift_name}'")
+#             # weekdays = [t.weekday for t in shift.timings]
+#             # if len(weekdays) != len(set(weekdays)):
+#             #     raise HTTPException(400, f"Duplicate weekday found in shift '{shift.shift_name}'")
 
 #             # ✅ Check internal overlaps
 #             shifts_fn.check_overlap(shift.timings)

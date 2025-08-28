@@ -37,6 +37,7 @@ def create_mold_machine(
         mapping = db.query(models.MoldMachine).filter(
             models.MoldMachine.mold_id == mold.id,
             models.MoldMachine.machine_id == machine.id,
+            models.MoldMachine.tenant_id == tenant_id
         ).first()
         if mapping:
             raise HTTPException(
@@ -48,6 +49,7 @@ def create_mold_machine(
         new_mold_machine = models.MoldMachine(
             mold_id=mold.id,
             machine_id=machine.id,
+            tenant_id=tenant_id,
             created_by=current_user.id,
             updated_by=current_user.id
         )
@@ -81,7 +83,8 @@ def update_mold_machine(
   tenant.user_role_admin(current_user)
   
   mapping = db.query(models.MoldMachine).filter(
-        models.MoldMachine.id == mold_machine_id
+        models.MoldMachine.id == mold_machine_id,
+        models.MoldMachine.tenant_id == current_user.tenant_id
     ).first()
 
   if not mapping:

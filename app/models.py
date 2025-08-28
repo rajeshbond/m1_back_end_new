@@ -50,6 +50,15 @@ class Tenant(Base):
     products = relationship("Product",back_populates="tenant", cascade="all, delete-orphan")
     machines = relationship("Machine", back_populates="tenant", cascade="all, delete-orphan")
     molds = relationship("Mold", back_populates="tenant", cascade="all, delete-orphan")
+    # production_logs = relationship("ProductionLog", back_populates="tenant", cascade="all, delete-orphan")
+    production_logs = relationship("ProductionLog", back_populates="tenant", cascade="all, delete-orphan")
+    production_downtimes = relationship("ProductionDowntime", back_populates="tenant", cascade="all, delete-orphan")
+    rejections = relationship("ProductionRejection", back_populates="tenant", cascade="all, delete-orphan")
+    mold_machines = relationship("MoldMachine", back_populates="tenant", cascade="all, delete-orphan")
+
+
+
+    
 
    
 # ---------------------------> Tenant table ends
@@ -79,6 +88,8 @@ class User(Base):
     tenant = relationship("Tenant", back_populates="users")
     department_users = relationship("DepartmentUser", back_populates="users", cascade="all, delete-orphan")
     inspection_result = relationship("ProductInspectionResult", back_populates="users", cascade="all, delete-orphan")
+    production_logs = relationship("ProductionLog", back_populates="users", cascade="all, delete-orphan")
+
 
 
     __table_args__ = (
@@ -103,6 +114,7 @@ class TenantShift(Base):
     # Relationships
     tenant = relationship("Tenant", back_populates="shifts")
     timings = relationship("ShiftTiming", back_populates="tenant_shift", cascade="all, delete-orphan")
+   
 
     __table_args__ = (
         UniqueConstraint('tenant_id','shift_name',name='uix_tenant_shift'),
@@ -112,6 +124,7 @@ class TenantShift(Base):
 # ---------------------------> Tenant Shift table ends
 
 # <-------------------------- ShiftTiming table starts 
+
 
 class ShiftTiming(Base):
     __tablename__ = "shift_timing"
@@ -127,13 +140,39 @@ class ShiftTiming(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     tenant_shift = relationship("TenantShift", back_populates="timings")
+    production_logs = relationship("ProductionLog", back_populates="shift_time", cascade="all, delete-orphan")
 
-
-    inspection_result = relationship("ProductInspectionResult", back_populates="shifts_timings", cascade="all, delete-orphan")
+    inspection_result = relationship(
+        "ProductInspectionResult",
+        back_populates="shifts_timings",
+        cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
-        UniqueConstraint('tenant_shift_id', 'weekday', name='uix_shift_timing'),
+        UniqueConstraint('tenant_shift_id', 'shift_start', 'shift_end', name='uix_shift_timing'),
     )
+
+# class ShiftTiming(Base):
+#     __tablename__ = "shift_timing"
+
+#     id = Column(Integer, primary_key=True, index=True)
+#     tenant_shift_id = Column(Integer, ForeignKey("tenant_shift.id", ondelete="CASCADE"), nullable=False)
+#     shift_start = Column(Time, nullable=False)
+#     shift_end = Column(Time, nullable=False)
+#     weekday = Column(Integer, nullable=True)  # 0 = Monday ... 6 = Sunday
+#     created_by = Column(Integer, nullable=True)
+#     updated_by = Column(Integer, nullable=True)
+#     created_at = Column(DateTime, server_default=func.now())
+#     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+#     tenant_shift = relationship("TenantShift", back_populates="timings")
+
+
+#     inspection_result = relationship("ProductInspectionResult", back_populates="shifts_timings", cascade="all, delete-orphan")
+
+#     __table_args__ = (
+#         UniqueConstraint('tenant_shift_id', 'shift_start', 'shift_end', name='uix_shift_timing'),
+#     )
 
 
 # ---------------------------> ShiftTiming table ends
@@ -148,10 +187,10 @@ class Defect(Base):
     updated_by = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
-
     # Relationships
     tenant = relationship("Tenant", back_populates="defects")
     defect_departments = relationship("DefectDepartment", back_populates="defects", cascade="all, delete-orphan")
+    rejections = relationship("ProductionRejection", back_populates="defect", cascade="all, delete-orphan")
    
   
 
@@ -174,6 +213,8 @@ class DownTime(Base):
     # Relationships
     tenant = relationship("Tenant", back_populates="down_times")
     downtime_departments = relationship("DownTimeDepartment", back_populates="downtime", cascade="all, delete-orphan")
+    production_downtimes = relationship("ProductionDowntime", back_populates="downtime", cascade="all, delete-orphan")
+  
     
     __table_args__ = (
         UniqueConstraint('tenant_id', 'downtime_name', name='uix_tenant_down_time'),
@@ -504,6 +545,7 @@ class Mold(Base):
     mold_no = Column(String, nullable=False)
     description = Column(String, nullable=True)
     cavities = Column(Integer, nullable=False)
+    target_shots =Column(Integer, nullable=False)
     special_notes = Column(JSONB, nullable=True)
     created_by = Column(Integer)
     updated_by = Column(Integer)
@@ -513,6 +555,8 @@ class Mold(Base):
     tenant = relationship("Tenant", back_populates="molds")
     product_molds = relationship("ProductMold", back_populates="mold", cascade="all, delete-orphan")
     mold_machines = relationship("MoldMachine", back_populates="mold", cascade="all, delete-orphan")
+    production_logs = relationship("ProductionLog", back_populates="mold", cascade="all, delete-orphan")
+    
 
     __table_args__ = (
         UniqueConstraint('tenant_id', 'mold_no', name='uix_tenant_mold_no'),
@@ -556,6 +600,8 @@ class Machine(Base):
     # Relationships
     tenant = relationship("Tenant", back_populates="machines")
     mold_machines = relationship("MoldMachine", back_populates="machines", cascade="all, delete-orphan")
+    production_logs = relationship("ProductionLog", back_populates="machines", cascade="all, delete-orphan")
+    
 
 
 
@@ -571,17 +617,102 @@ class MoldMachine(Base):
     id = Column(Integer, primary_key=True, index=True)
     mold_id = Column(Integer, ForeignKey('mold.id', ondelete='CASCADE'), nullable=False)
     machine_id = Column(Integer, ForeignKey('machine.id', ondelete='CASCADE'), nullable=False)
+    tenant_id = Column(Integer, ForeignKey('tenant.id', ondelete='CASCADE'), nullable=False)
+
 
     # Relationships
     mold = relationship("Mold", back_populates="mold_machines")
     machines = relationship("Machine", back_populates="mold_machines")
+    tenant = relationship("Tenant", back_populates="mold_machines")
     created_by = Column(Integer)
     updated_by = Column(Integer)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint('mold_id', 'machine_id', name='uix_mold_machine'),
+        UniqueConstraint('tenant_id','mold_id', 'machine_id', name='uix_mold_machine'),
     )
 
 # <-------------------------- Mold Machine Table ends here-------------------------->
+
+# Production Log for shifts starts here
+
+class ProductionLog(Base):
+    __tablename__ = "production_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenant.id', ondelete='CASCADE'), nullable=False)
+    operator = Column(Integer, ForeignKey('user.id', ondelete='SET NULL'), nullable=True)
+    shift_time_id = Column(Integer, ForeignKey("shift_timing.id"), nullable=False)
+    log_date  = Column(Date, nullable=False)
+    mold_id = Column(Integer, ForeignKey("mold.id"), nullable=False)
+    machine_id = Column(Integer, ForeignKey("machine.id"), nullable=False)
+    created_by = Column(Integer)
+    updated_by = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    shots_per_hr = Column(Integer, nullable=False)
+    actual = Column(Integer, nullable=True)
+
+    # Relationships
+    shift_time = relationship("ShiftTiming", back_populates="production_logs")
+    mold = relationship("Mold", back_populates="production_logs")
+    machines = relationship("Machine", back_populates="production_logs")
+    tenant = relationship("Tenant", back_populates="production_logs")
+    users = relationship("User", back_populates="production_logs")
+    rejections = relationship("ProductionRejection", back_populates="production_log", cascade="all, delete-orphan")
+    downtimes = relationship("ProductionDowntime", back_populates="production_log", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "shift_time_id", "log_date", "mold_id", "machine_id",
+            name="uq_tenant_shift_date_mold_machine"
+        ),
+    )
+
+# Production Log for shifts ends here
+
+# Production Log for defects starts here
+
+class ProductionDowntime(Base):
+    __tablename__ = "production_downtime"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenant.id', ondelete='CASCADE'), nullable=False)
+    production_log_id = Column(Integer, ForeignKey("production_log.id"), nullable=False)
+    downtime_id = Column(Integer, ForeignKey("down_time.id"), nullable=False)  # lookup downtime reasons
+    duration_min = Column(Integer, nullable=False)
+    created_by = Column(Integer)
+    updated_by = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relationships
+    tenant = relationship("Tenant", back_populates="production_downtimes")
+    downtime = relationship("DownTime", back_populates="production_downtimes")
+    production_log = relationship("ProductionLog", back_populates="downtimes")
+
+    __table_args__ = (
+        UniqueConstraint("production_log_id", "downtime_id", name="uq_production_downtime"),
+    )
+
+# Production Log for defects ends here
+
+# Production Log for rejections starts here
+class ProductionRejection(Base):
+    __tablename__ = "production_rejection"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenant.id', ondelete='CASCADE'), nullable=False)
+    production_log_id = Column(Integer, ForeignKey("production_log.id"), nullable=False)
+    defect_id = Column(Integer, ForeignKey("defect.id"), nullable=False)  # lookup defects
+    quantity = Column(Integer, nullable=False)
+
+    production_log = relationship("ProductionLog", back_populates="rejections")
+    tenant = relationship("Tenant", back_populates="rejections")
+    defect = relationship("Defect", back_populates="rejections")
+
+    __table_args__ = (
+        UniqueConstraint("production_log_id", "defect_id", name="uq_production_defect"),
+    )
