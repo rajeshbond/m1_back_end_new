@@ -3,6 +3,7 @@ from operator import and_
 from typing import List
 from fastapi import Response, status,HTTPException,Depends,APIRouter
 import pandas as pd
+from pydantic import ValidationError
 from sqlalchemy import tuple_
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -25,134 +26,457 @@ def create_production_log(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(oauth2.get_current_user)
 ):
-    # -------------------
-    # 1. User validation
-    # -------------------
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Unauthorized user")
+    try:
+        # -------------------
+        # 1. User validation
+        # -------------------
+        user.get_user_status(current_user)
+        if not current_user:
+            raise HTTPException(status_code=401, detail="Unauthorized user")
+        if current_user.tenant_id != payload.tenant_id:
+            raise HTTPException(status_code=403, detail="User not allowed for this tenant")
 
-    if current_user.tenant_id != payload.tenant_id:
-        raise HTTPException(status_code=403, detail="User not allowed for this tenant")
+        # -------------------
+        # 2. Prevent future dates/shifts
+        # -------------------
+        today = date.today()
+        now = datetime.now()
 
-    # --------------------------------------------------
-    # 2. Prevent creating logs for future dates/shifts
-    # --------------------------------------------------
-    today = date.today()
-    now = datetime.now()
+        if payload.log_date > today:
+            raise HTTPException(status_code=400, detail="Cannot create entry for future date")
 
-    if payload.date > today:
-        raise HTTPException(status_code=400, detail="Cannot create entry for future date")
+        # ShiftTiming belongs to TenantShift, which belongs to Tenant
+        shift = (
+            db.query(models.ShiftTiming)
+            .join(models.TenantShift)
+            .filter(
+                models.ShiftTiming.id == payload.shift_id,
+                models.TenantShift.tenant_id == payload.tenant_id
+            )
+            .first()
+        )
+        if not shift:
+            raise HTTPException(status_code=404, detail="Shift not found for tenant")
 
-    # get shift timings
-    shift = db.query(models.ShiftTiming).filter(
-        models.ShiftTiming.id == payload.shift_time_id,
-        models.ShiftTiming.tenant_id == payload.tenant_id
-    ).first()
+        shift_end = datetime.combine(payload.log_date, shift.shift_end)
+        if shift_end > now:
+            raise HTTPException(status_code=400, detail="Cannot enter data for an advance shift")
 
-    if not shift:
-        raise HTTPException(status_code=404, detail="Shift not found for tenant")
-
-    # Combine shift date with shift end_time to block future shifts
-    shift_end = datetime.combine(payload.date, shift.end_time)
-    if shift_end > now:
-        raise HTTPException(status_code=400, detail="Cannot enter data for an advance shift")
-
-    # --------------------------------------------------
-    # 3. Validate Mold-Machine mapping belongs to tenant
-    # --------------------------------------------------
-    mold_machine = db.query(models.MoldMachine) \
-        .join(models.Mold, models.Mold.id == models.MoldMachine.mold_id) \
-        .join(models.Machine, models.Machine.id == models.MoldMachine.machine_id) \
-        .filter(
-            models.MoldMachine.id == payload.mold_machine_id,
-            models.Mold.tenant_id == payload.tenant_id,
-            models.Machine.tenant_id == payload.tenant_id
+        # -------------------
+        # 3. Validate Mold exists and get target_qty
+        # -------------------
+        mold = db.query(models.Mold).filter(
+            models.Mold.id == payload.mold_id,
+            models.Mold.tenant_id == payload.tenant_id
         ).first()
+        if not mold:
+            raise HTTPException(status_code=404, detail="Mold not found for tenant")
 
-    if not mold_machine:
-        raise HTTPException(status_code=404, detail="Invalid Mold-Machine mapping for this tenant")
+        target_qty = payload.target_qty or mold.target_shots
 
-    # --------------------------------------------------
-    # 4. Prevent duplicate entry per tenant/date/shift/mold_machine
-    # --------------------------------------------------
-    existing_log = db.query(models.ProductionLog).filter(
-        and_(
+        # -------------------
+        # 4. Validate Mold-Machine mapping
+        # -------------------
+        mold_machine = db.query(models.MoldMachine).filter(
+            models.MoldMachine.mold_id == payload.mold_id,
+            models.MoldMachine.machine_id == payload.machine_id,
+        ).first()
+        if not mold_machine:
+            raise HTTPException(status_code=400, detail="Mold and Machine are not mapped for this tenant {current_user.tenant.tenant_name}")
+
+        # -------------------
+        # 5. Prevent duplicate entry
+        # -------------------
+        existing_log = db.query(models.ProductionLog).filter(
             models.ProductionLog.tenant_id == payload.tenant_id,
-            models.ProductionLog.date == payload.date,
-            models.ProductionLog.shift_time_id == payload.shift_time_id,
-            models.ProductionLog.mold_machine_id == payload.mold_machine_id
-        )
-    ).first()
+            models.ProductionLog.log_date == payload.log_date,
+            models.ProductionLog.shift_time_id == payload.shift_id,
+            models.ProductionLog.mold_id == payload.mold_id,
+            models.ProductionLog.machine_id == payload.machine_id
+            ).first()
+        if existing_log:
+            raise HTTPException(
+                status_code=400,
+                detail="Duplicate entry already exists for this tenant/date/shift/mold-machine"
+            )
 
-    if existing_log:
+        # -------------------
+        # 6. Insert Production Log
+        # -------------------
+        new_log = models.ProductionLog(
+            tenant_id=payload.tenant_id,
+            operator=current_user.id,
+            shift_time_id=payload.shift_id,
+            log_date=payload.log_date,
+            mold_id=payload.mold_id,
+            machine_id=payload.machine_id,
+            actual_qty=payload.actual_qty,
+            target_qty=target_qty,
+            created_by=current_user.id,
+            updated_by=current_user.id
+        )
+        db.add(new_log)
+        db.commit()
+        db.refresh(new_log)
+
+        # -------------------
+        # 7. Efficiency calculation
+        # -------------------
+        efficiency = (payload.actual_qty / target_qty * 100) if target_qty else 0
+
+        # -------------------
+        # 8. Bulk Insert Downtime & Rejections (if efficiency < 95%)
+        # -------------------
+        downtime_count = 0
+        rejection_count = 0
+        if efficiency < 95:
+            # Downtimes
+            if payload.downtime_entries:
+                df_downtime = pd.DataFrame([{
+                    "tenant_id": payload.tenant_id,
+                    "production_log_id": new_log.id,
+                    "downtime_id": d.reason_id,
+                    "duration_min": d.duration,
+                    "created_by": current_user.id
+                } for d in payload.downtime_entries])
+
+                df_downtime.drop_duplicates(
+                    subset=["tenant_id", "production_log_id", "downtime_id"],
+                    inplace=True
+                )
+
+                df_downtime.to_sql("production_downtime", db.bind, if_exists="append", index=False)
+
+            # Defects/Rejections
+            if payload.defect_entries:
+                df_rejection = pd.DataFrame([{
+                    "tenant_id": payload.tenant_id,
+                    "production_log_id": new_log.id,
+                    "defect_id": r.defect_type_id,
+                    "quantity": r.quantity
+                } for r in payload.defect_entries])
+
+                df_rejection.drop_duplicates(
+                    subset=["tenant_id", "production_log_id", "defect_id"],
+                    inplace=True
+                )
+
+                df_rejection.to_sql("production_rejection", db.bind, if_exists="append", index=False)
+
+        return {
+            "message": "Production log created successfully",
+            "production_log_id": new_log.id,
+            "efficiency": efficiency,
+            "downtime_entries": len(payload.downtime_entries or []),
+            "rejection_entries": len(payload.defect_entries or [])
+        }
+
+    except HTTPException as he:
+        raise he
+    except ValidationError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except IntegrityError as ie:
+        db.rollback()
         raise HTTPException(
-            status_code=400,
-            detail="Duplicate entry already exists for this tenant/date/shift/mold-machine"
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Integrity error: {str(ie.orig)}"
         )
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+# @router.post("/production-log/")
+# def create_production_log(
+#     payload: schemas.ProductionLogCreate,
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(oauth2.get_current_user)
+# ):
+#     try:
+#         # -------------------
+#         # 1. User validation
+#         # -------------------
+#         if not current_user:
+#             raise HTTPException(status_code=401, detail="Unauthorized user")
+#         if current_user.tenant_id != payload.tenant_id:
+#             raise HTTPException(status_code=403, detail="User not allowed for this tenant")
 
-    # --------------------------------------------------
-    # 5. Insert Production Log
-    # --------------------------------------------------
-    new_log = models.ProductionLog(
-        tenant_id=payload.tenant_id,
-        operator=current_user.id,
-        shift_time_id=payload.shift_time_id,
-        date=payload.date,
-        mold_machine_id=payload.mold_machine_id,
-        actual=payload.actual,
-        target=payload.target
-    )
-    db.add(new_log)
-    db.commit()
-    db.refresh(new_log)
+#         # -------------------
+#         # 2. Prevent future dates/shifts
+#         # -------------------
+#         today = date.today()
+#         now = datetime.now()
 
-    # --------------------------------------------------
-    # 6. Efficiency calculation
-    # --------------------------------------------------
-    efficiency = (payload.actual / payload.target * 100) if payload.target else 0
+#         if payload.log_date > today:
+#             raise HTTPException(status_code=400, detail="Cannot create entry for future date")
 
-    # --------------------------------------------------
-    # 7. Bulk Insert Downtime & Rejections (only if eff < 95%)
-    # --------------------------------------------------
-    if efficiency < 95:
-        # ---- Downtimes ----
-        if payload.downtime_entries:
-            df_downtime = pd.DataFrame([{
-                "tenant_id": payload.tenant_id,
-                "production_log_id": new_log.id,
-                "downtime_id": d.downtime_id,
-                "duration_min": d.duration_min,
-                "created_by": current_user.id
-            } for d in payload.downtime_entries])
+#         shift = db.query(models.ShiftTiming).filter(
+#             models.ShiftTiming.id == payload.shift_id,
+#             models.ShiftTiming.tenant_id == payload.tenant_id
+#         ).first()
+#         if not shift:
+#             raise HTTPException(status_code=404, detail="Shift not found for tenant")
 
-            # remove duplicates (tenant_id + production_log_id + downtime_id)
-            df_downtime.drop_duplicates(
-                subset=["tenant_id", "production_log_id", "downtime_id"],
-                inplace=True
-            )
+#         shift_end = datetime.combine(payload.log_date, shift.end_time)
+#         if shift_end > now:
+#             raise HTTPException(status_code=400, detail="Cannot enter data for an advance shift")
 
-            df_downtime.to_sql("production_downtime", db.bind, if_exists="append", index=False)
+#         # -------------------
+#         # 3. Validate Mold exists and get target_qty
+#         # -------------------
+#         mold = db.query(models.Mold).filter(
+#             models.Mold.id == payload.mold_id,
+#             models.Mold.tenant_id == payload.tenant_id
+#         ).first()
+#         if not mold:
+#             raise HTTPException(status_code=404, detail="Mold not found for tenant")
 
-        # ---- Rejections ----
-        if payload.defect_entries:
-            df_rejection = pd.DataFrame([{
-                "tenant_id": payload.tenant_id,
-                "production_log_id": new_log.id,
-                "defect_id": r.defect_id,
-                "quantity": r.quantity
-            } for r in payload.defect_entries])
+#         target_qty = payload.target_qty or mold.target_shots
 
-            df_rejection.drop_duplicates(
-                subset=["tenant_id", "production_log_id", "defect_id"],
-                inplace=True
-            )
+#         # -------------------
+#         # 4. Validate Mold-Machine mapping
+#         # -------------------
+#         mold_machine = db.query(models.MoldMachine).filter(
+#             models.MoldMachine.mold_id == payload.mold_id,
+#             models.MoldMachine.machine_id == payload.machine_id,
+#         ).first()
+#         if not mold_machine:
+#             raise HTTPException(status_code=400, detail="Mold and Machine are not mapped for this tenant")
 
-            df_rejection.to_sql("production_rejection", db.bind, if_exists="append", index=False)
+#         # -------------------
+#         # 5. Prevent duplicate entry
+#         # -------------------
+#         existing_log = db.query(models.ProductionLog).filter(
+#             and_(
+#                 models.ProductionLog.tenant_id == payload.tenant_id,
+#                 models.ProductionLog.date == payload.log_date,
+#                 models.ProductionLog.shift_time_id == payload.shift_id,
+#                 models.ProductionLog.mold_machine_id == mold_machine.id
+#             )
+#         ).first()
+#         if existing_log:
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail="Duplicate entry already exists for this tenant/date/shift/mold-machine"
+#             )
 
-    return {
-        "message": "Production log created successfully",
-        "production_log_id": new_log.id,
-        "efficiency": efficiency,
-        "downtime_entries": len(payload.downtime_entries or []),
-        "rejection_entries": len(payload.defect_entries or [])
-    }
+#         # -------------------
+#         # 6. Insert Production Log
+#         # -------------------
+#         new_log = models.ProductionLog(
+#             tenant_id=payload.tenant_id,
+#             operator=current_user.id,
+#             shift_time_id=payload.shift_id,
+#             date=payload.log_date,
+#             mold_machine_id=mold_machine.id,
+#             actual=payload.actual_qty,
+#             target=target_qty
+#         )
+#         db.add(new_log)
+#         db.commit()
+#         db.refresh(new_log)
+
+#         # -------------------
+#         # 7. Efficiency calculation
+#         # -------------------
+#         efficiency = (payload.actual_qty / target_qty * 100) if target_qty else 0
+
+#         # -------------------
+#         # 8. Bulk Insert Downtime & Rejections (if efficiency < 95%)
+#         # -------------------
+#         if efficiency < 95:
+#             # Downtimes
+#             if payload.downtime_entries:
+#                 df_downtime = pd.DataFrame([{
+#                     "tenant_id": payload.tenant_id,
+#                     "production_log_id": new_log.id,
+#                     "downtime_id": d.reason_id,
+#                     "duration_min": d.duration,
+#                     "created_by": current_user.id
+#                 } for d in payload.downtime_entries])
+
+#                 df_downtime.drop_duplicates(
+#                     subset=["tenant_id", "production_log_id", "downtime_id"],
+#                     inplace=True
+#                 )
+
+#                 df_downtime.to_sql("production_downtime", db.bind, if_exists="append", index=False)
+
+#             # Defects/Rejections
+#             if payload.defect_entries:
+#                 df_rejection = pd.DataFrame([{
+#                     "tenant_id": payload.tenant_id,
+#                     "production_log_id": new_log.id,
+#                     "defect_id": r.defect_type_id,
+#                     "quantity": r.quantity
+#                 } for r in payload.defect_entries])
+
+#                 df_rejection.drop_duplicates(
+#                     subset=["tenant_id", "production_log_id", "defect_id"],
+#                     inplace=True
+#                 )
+
+#                 df_rejection.to_sql("production_rejection", db.bind, if_exists="append", index=False)
+
+#         return {
+#             "message": "Production log created successfully",
+#             "production_log_id": new_log.id,
+#             "efficiency": efficiency,
+#             "downtime_entries": len(payload.downtime_entries or []),
+#             "rejection_entries": len(payload.defect_entries or [])
+#         }
+#     except HTTPException as he:
+#         raise he
+#     except ValidationError as ve:
+#         raise HTTPException(status_code=400, detail=str(ve))
+#     except IntegrityError:
+#         db.rollback()
+#         raise HTTPException(
+#             status_code=status.HTTP_409_CONFLICT,
+#             detail=f"Product No '{payload.product_name}' already exists for the tenant {current_user.tenant.tenant_name}."
+#         )
+#     except ValueError as ve:
+#         raise HTTPException(status_code=400, detail=str(ve))
+#     except SQLAlchemyError as e:
+#         db.rollback()
+#         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+# @router.post("/production-log/")
+# def create_production_log(
+#     payload: schemas.ProductionLogCreate,
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(oauth2.get_current_user)
+# ):
+#     # -------------------
+#     # 1. User validation
+#     # -------------------
+#     if not current_user:
+#         raise HTTPException(status_code=401, detail="Unauthorized user")
+
+#     if current_user.tenant_id != payload.tenant_id:
+#         raise HTTPException(status_code=403, detail="User not allowed for this tenant")
+
+#     # --------------------------------------------------
+#     # 2. Prevent creating logs for future dates/shifts
+#     # --------------------------------------------------
+#     today = date.today()
+#     now = datetime.now()
+
+#     if payload.date > today:
+#         raise HTTPException(status_code=400, detail="Cannot create entry for future date")
+
+#     # get shift timings
+#     shift = db.query(models.ShiftTiming).filter(
+#         models.ShiftTiming.id == payload.shift_time_id,
+#         models.ShiftTiming.tenant_id == payload.tenant_id
+#     ).first()
+
+#     if not shift:
+#         raise HTTPException(status_code=404, detail="Shift not found for tenant")
+
+#     # Combine shift date with shift end_time to block future shifts
+#     shift_end = datetime.combine(payload.date, shift.end_time)
+#     if shift_end > now:
+#         raise HTTPException(status_code=400, detail="Cannot enter data for an advance shift")
+
+#     # --------------------------------------------------
+#     # 3. Validate Mold-Machine mapping belongs to tenant
+#     # --------------------------------------------------
+#     mold_machine = db.query(models.MoldMachine) \
+#         .join(models.Mold, models.Mold.id == models.MoldMachine.mold_id) \
+#         .join(models.Machine, models.Machine.id == models.MoldMachine.machine_id) \
+#         .filter(
+#             models.MoldMachine.id == payload.mold_machine_id,
+#             models.Mold.tenant_id == payload.tenant_id,
+#             models.Machine.tenant_id == payload.tenant_id
+#         ).first()
+
+#     if not mold_machine:
+#         raise HTTPException(status_code=404, detail="Invalid Mold-Machine mapping for this tenant")
+
+#     # --------------------------------------------------
+#     # 4. Prevent duplicate entry per tenant/date/shift/mold_machine
+#     # --------------------------------------------------
+#     existing_log = db.query(models.ProductionLog).filter(
+#         and_(
+#             models.ProductionLog.tenant_id == payload.tenant_id,
+#             models.ProductionLog.date == payload.date,
+#             models.ProductionLog.shift_time_id == payload.shift_time_id,
+#             models.ProductionLog.mold_machine_id == payload.mold_machine_id
+#         )
+#     ).first()
+
+#     if existing_log:
+#         raise HTTPException(
+#             status_code=400,
+#             detail="Duplicate entry already exists for this tenant/date/shift/mold-machine"
+#         )
+
+#     # --------------------------------------------------
+#     # 5. Insert Production Log
+#     # --------------------------------------------------
+#     new_log = models.ProductionLog(
+#         tenant_id=payload.tenant_id,
+#         operator=current_user.id,
+#         shift_time_id=payload.shift_time_id,
+#         date=payload.date,
+#         mold_machine_id=payload.mold_machine_id,
+#         actual=payload.actual,
+#         target=payload.target
+#     )
+#     db.add(new_log)
+#     db.commit()
+#     db.refresh(new_log)
+
+#     # --------------------------------------------------
+#     # 6. Efficiency calculation
+#     # --------------------------------------------------
+#     efficiency = (payload.actual / payload.target * 100) if payload.target else 0
+
+#     # --------------------------------------------------
+#     # 7. Bulk Insert Downtime & Rejections (only if eff < 95%)
+#     # --------------------------------------------------
+#     if efficiency < 95:
+#         # ---- Downtimes ----
+#         if payload.downtime_entries:
+#             df_downtime = pd.DataFrame([{
+#                 "tenant_id": payload.tenant_id,
+#                 "production_log_id": new_log.id,
+#                 "downtime_id": d.downtime_id,
+#                 "duration_min": d.duration_min,
+#                 "created_by": current_user.id
+#             } for d in payload.downtime_entries])
+
+#             # remove duplicates (tenant_id + production_log_id + downtime_id)
+#             df_downtime.drop_duplicates(
+#                 subset=["tenant_id", "production_log_id", "downtime_id"],
+#                 inplace=True
+#             )
+
+#             df_downtime.to_sql("production_downtime", db.bind, if_exists="append", index=False)
+
+#         # ---- Rejections ----
+#         if payload.defect_entries:
+#             df_rejection = pd.DataFrame([{
+#                 "tenant_id": payload.tenant_id,
+#                 "production_log_id": new_log.id,
+#                 "defect_id": r.defect_id,
+#                 "quantity": r.quantity
+#             } for r in payload.defect_entries])
+
+#             df_rejection.drop_duplicates(
+#                 subset=["tenant_id", "production_log_id", "defect_id"],
+#                 inplace=True
+#             )
+
+#             df_rejection.to_sql("production_rejection", db.bind, if_exists="append", index=False)
+
+#     return {
+#         "message": "Production log created successfully",
+#         "production_log_id": new_log.id,
+#         "efficiency": efficiency,
+#         "downtime_entries": len(payload.downtime_entries or []),
+#         "rejection_entries": len(payload.defect_entries or [])
+#     }

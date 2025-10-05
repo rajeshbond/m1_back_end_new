@@ -15,6 +15,9 @@ def employee_code(employee_id,tenant_code):
     new_employe_code = f"{employee_id}@{tenant_code}"
     return new_employe_code.lower()
 
+
+
+
 def check_type(value: str) -> str:
     email_pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
     upi_pattern = r'^[\w\.-]+@[\w\.-]+$'

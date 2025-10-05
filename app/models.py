@@ -644,6 +644,8 @@ class ProductionLog(Base):
     tenant_id = Column(Integer, ForeignKey('tenant.id', ondelete='CASCADE'), nullable=False)
     operator = Column(Integer, ForeignKey('user.id', ondelete='SET NULL'), nullable=True)
     shift_time_id = Column(Integer, ForeignKey("shift_timing.id"), nullable=False)
+    target_qty = Column(Integer, nullable=False)
+    actual_qty = Column(Integer, nullable=False)
     log_date  = Column(Date, nullable=False)
     mold_id = Column(Integer, ForeignKey("mold.id"), nullable=False)
     machine_id = Column(Integer, ForeignKey("machine.id"), nullable=False)
@@ -652,8 +654,6 @@ class ProductionLog(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    shots_per_hr = Column(Integer, nullable=False)
-    actual = Column(Integer, nullable=True)
 
     # Relationships
     shift_time = relationship("ShiftTiming", back_populates="production_logs")

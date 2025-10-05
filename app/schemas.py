@@ -122,6 +122,8 @@ class ResetPassword(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    role_id: Optional[int] = None
+    # user: UserOut
     
 
 class TokenData(BaseModel):
@@ -417,6 +419,16 @@ class MoldUpdate(MoldBase):
 class MoldCreateResponse(BaseModel):
     message: str
     mold: MoldBase
+class MoldOut(MoldBase):
+    id: int
+    tenant: Tenantout   # ✅ nested model
+    created_by: Optional[int]
+    updated_by: Optional[int]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
 
 class MachineBase(BaseModel):
     machine_code: str
@@ -484,33 +496,45 @@ class MoldMachineOut(BaseModel):
 
 
 # ---- Downtime & Defect Entries ----
+# ------------------------
+# Downtime Entry Schema
+# ------------------------
 class DowntimeEntry(BaseModel):
-    reason_id: int
-    duration: float
+    reason_id: int = Field(..., description="ID of the downtime reason")
+    duration: float = Field(..., description="Duration of downtime in minutes")
 
-
+# ------------------------
+# Defect Entry Schema
+# ------------------------
 class DefectEntry(BaseModel):
-    defect_type_id: int
-    quantity: int
+    defect_type_id: int = Field(..., description="ID of the defect type")
+    quantity: int = Field(..., description="Number of defective units")
 
-
+# ------------------------
+# Base Production Log Schema
+# ------------------------
 class ProductionLogBase(BaseModel):
     tenant_id: int
     shift_id: int
     log_date: date = Field(..., description="Production log date")
-    mold_id: int
-    target_qty: int
-    actual_qty: int
+    mold_id: int = Field(..., description="Mold ID")
+    machine_id: int = Field(..., description="Machine ID")
+    target_qty: Optional[int] = Field(None, description="Target quantity (optional, fallback to mold target_shots)")
+    actual_qty: int = Field(..., description="Actual production quantity")
 
-
+# ------------------------
+# Production Log Create Schema
+# ------------------------
 class ProductionLogCreate(ProductionLogBase):
-    downtime_entries: Optional[List[DowntimeEntry]] = Field(default_factory=list)
-    defect_entries: Optional[List[DefectEntry]] = Field(default_factory=list)
+    downtime_entries: Optional[List[DowntimeEntry]] = Field(default_factory=list, description="List of downtime entries")
+    defect_entries: Optional[List[DefectEntry]] = Field(default_factory=list, description="List of defect entries")
 
-
+# ------------------------
+# Production Log Response Schema
+# ------------------------
 class ProductionLogResponse(ProductionLogBase):
     id: int
 
     model_config = {
-    "from_attributes": True
+        "from_attributes": True  # Allows reading from ORM/SQLAlchemy objects
     }

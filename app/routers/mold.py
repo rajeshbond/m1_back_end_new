@@ -183,7 +183,7 @@ def create_product_mold(
         if not product:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Product '{product_mold.product_name}' not found for current tenant"
+                detail=f"Product '{product_mold.product_name}' not found for tenant {current_user.tenant.tenant_name}"
             )
 
         # --- Find mold ---
@@ -205,7 +205,7 @@ def create_product_mold(
         if existing_pm:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This Product-Mold mapping already exists"
+                detail="This Product-Mold mapping already exists for tenant {current_user.tenant.tenant_name}"
             )
 
         # --- Create mapping ---
@@ -306,13 +306,47 @@ def update_product_mold(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
     
 
-# 🔹 READ (all for tenant)
-@router.get("/", response_model=list[schemas.ProductMoldOut])
+# Read all the mold related to tenant
+
+@router.get("/mold", response_model=list[schemas.MoldOut])
+def list_molds(
+    db: Session = Depends(get_db),
+    current_user: schemas.User = Depends(oauth2.get_current_user)
+):
+    tenant_id = current_user.tenant.id
+    mappings = db.query(models.Mold).filter(models.Mold.tenant_id == tenant_id).all()
+    if not mappings:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Not Mold found for Tenant {current_user.tenant.tenant_name}"
+        )
+    return [schemas.MoldOut.model_validate(m) for m in mappings]
+
+# Read  the mold with id related to tenant
+@router.get("/one/", response_model=schemas.MoldOut)
+def get_mold(
+    mold_id: int,
+    db: Session = Depends(get_db),
+    current_user: schemas.User = Depends(oauth2.get_current_user)
+):
+    tenant_id = current_user.tenant.id
+    print(current_user.tenant.tenant_name)
+    mold = db.query(models.Mold).filter(models.Mold.id == mold_id, models.Mold.tenant_id == tenant_id).first()
+    if not mold:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Mold with id {mold_id} not found for Tenant {current_user.tenant.tenant_name}"
+        )
+    return schemas.MoldOut.model_validate(mold)
+
+# 🔹 READ (all for tenant Produc mold )
+@router.get("/product-mold", response_model=list[schemas.ProductMoldOut])
 def list_product_molds(
     db: Session = Depends(get_db),
     current_user: schemas.User = Depends(oauth2.get_current_user)
 ):
     tenant_id = current_user.tenant.id
+    print(current_user.tenant.tenant_name)
     mappings = (
         db.query(models.ProductMold, models.Product, models.Mold)
         .join(models.Product, models.ProductMold.product_id == models.Product.id)
@@ -321,7 +355,11 @@ def list_product_molds(
         .filter(models.Mold.tenant_id == tenant_id)      # ✅ filter via Mold
         .all()
     )
-
+    if not mappings:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Not Product-Mold mapping found for Tenant {current_user.tenant.tenant_name}"
+        )
     return [
         schemas.ProductMoldOut(
             id=pm.ProductMold.id,

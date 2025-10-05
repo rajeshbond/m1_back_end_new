@@ -11,18 +11,24 @@ router = APIRouter(tags=['Authentication'])
 
 @router.post('/login',response_model= schemas.Token)
 def login(user_credentials:OAuth2PasswordRequestForm = Depends(), db: Session = Depends(database.get_db)):
+    # print(user_credentials.username)
+    # print(user_credentials.password)
     try:
         type = utls.check_type(user_credentials.username)
         if type == 'email':
             user = db.query(models.User).filter(models.User.email == user_credentials.username.lower()).first()
         elif type == 'upi':
+
             user = db.query(models.User).filter(models.User.employee_id == user_credentials.username.lower()).first()
+           
         else:
-            raise HTTPException(status_code=status.HTTP_406_NOT_ACCEPTABLE, detail=f"{user_credentials.username} is not valid please re-check !!!")
+            raise HTTPException(status_code=status.HTTP_406_NOT_ACCEPTABLE, detail=f"{user_credentials.username} is not valid username, please re-check !!!")
         if not user:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,detail=f"No such {user_credentials.username} username Found found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,detail=f" {user_credentials.username} no such username Found")
+        role = db.query(models.UserRole).filter(models.UserRole.id == user.role_id).first()
 
         tenant_details = db.query(models.Tenant).filter(models.Tenant.id == user.tenant_id).first()
+        # print(tenant_details.tenant_name)
         if not tenant_details:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,detail=f"No such tenant found")
         # print(tenant_details.is_active) # for debugginh purpose 
@@ -51,8 +57,10 @@ def login(user_credentials:OAuth2PasswordRequestForm = Depends(), db: Session = 
         
         # CREATE TOKEN 
         access_token= oauth2.create_access_token(data= {"user_id": user.id})
+        # print(f"User {user} logged in successfully")
         # print(access_token)
-        return {"access_token":access_token, "token_type":"bearer"} 
+        # print(role.user_role)
+        return {"access_token":access_token, "token_type":"bearer", "role_id": user.role_id} 
     except HTTPException as he:
         raise he
     except SQLAlchemyError as e:

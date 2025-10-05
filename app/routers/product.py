@@ -5,6 +5,7 @@ from sqlalchemy import tuple_
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from ..function import tenant,user
+from sqlalchemy import func, tuple_
 
 from .. import schemas,oauth2,models
 # from ..function import ad
@@ -259,7 +260,6 @@ def get_product(product_id: int, db: Session = Depends(get_db), current_user: in
         )
 
 # -------------------- PRODUCT DRAWING CRUD --------------------
-
 @router.post("/drawings/bulk", status_code=status.HTTP_201_CREATED)
 def create_multiple_product_drawings(
     payload: List[schemas.ProductDrawingCreate],
@@ -269,6 +269,7 @@ def create_multiple_product_drawings(
     try:
         user.get_user_status(current_user)
         tenant.user_role_admin(current_user)
+        tenant_id = current_user.tenant.id
 
         if not payload:
             raise HTTPException(status_code=400, detail="No drawings provided")
@@ -286,37 +287,60 @@ def create_multiple_product_drawings(
         df_payload["created_by"] = current_user.id
         df_payload["updated_by"] = current_user.id
 
-        # Query existing ones from DB
-        existing = db.query(
-            models.ProductDrawing.product_id,
-            models.ProductDrawing.drawing_no
-        ).filter(
-            tuple_(models.ProductDrawing.product_id, models.ProductDrawing.drawing_no)
-            .in_([(p.product_id, p.drawing_no.strip().lower()) for p in payload])
-        ).distinct().all()
+        # -------------------------------------------------
+        # Step 1: Validate product_ids belong to tenant
+        valid_product_ids = {
+            pid for (pid,) in db.query(models.Product.id).filter(models.Product.tenant_id == tenant_id).all()
+        }
 
-        # Convert DB existing to DataFrame and normalize
+        df_valid = df_payload[df_payload["product_id"].isin(valid_product_ids)]
+        df_invalid = df_payload[~df_payload["product_id"].isin(valid_product_ids)]
+
+        # -------------------------------------------------
+        # Step 2: Find already existing drawings in DB (only for valid tenant products)
+        existing = (
+            db.query(
+                models.ProductDrawing.product_id,
+                models.ProductDrawing.drawing_no
+            )
+            .join(models.Product, models.Product.id == models.ProductDrawing.product_id)
+            .filter(
+                models.Product.tenant_id == tenant_id,
+                tuple_(
+                    models.ProductDrawing.product_id,
+                    func.lower(func.trim(models.ProductDrawing.drawing_no))
+                ).in_([
+                    (p.product_id, p.drawing_no.strip().lower()) for p in payload
+                ])
+            )
+            .distinct()
+            .all()
+        )
+
         df_existing = pd.DataFrame(existing, columns=["product_id", "drawing_no"])
         if not df_existing.empty:
             df_existing["drawing_no"] = df_existing["drawing_no"].str.strip().str.lower()
 
-        # Filter only new rows
-        if not df_existing.empty:
-            df_new = df_payload.merge(
+        # -------------------------------------------------
+        # Step 3: Exclude duplicates (existing records)
+        if not df_existing.empty and not df_valid.empty:
+            df_new = df_valid.merge(
                 df_existing, on=["product_id", "drawing_no"], how="left", indicator=True
             ).query('_merge == "left_only"').drop(columns=["_merge"])
         else:
-            df_new = df_payload.copy()
+            df_new = df_valid.copy()
 
-        # Insert only if there are new records
+        # -------------------------------------------------
+        # Step 4: Insert only new valid rows
         if not df_new.empty:
             db.bulk_insert_mappings(models.ProductDrawing, df_new.to_dict(orient="records"))
             db.commit()
 
         return {
             "created_count": len(df_new),
-            "skipped_count": len(df_existing),
-            "skipped": df_existing.to_dict(orient="records")
+            "skipped_duplicates": df_existing.to_dict(orient="records"),
+            "skipped_invalid_tenant": df_invalid.to_dict(orient="records"),
+            "skipped_count": len(df_existing) + len(df_invalid),
         }
 
     except HTTPException as he:
@@ -333,6 +357,92 @@ def create_multiple_product_drawings(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}"
         )
+
+# @router.post("/drawings/bulk", status_code=status.HTTP_201_CREATED)
+# def create_multiple_product_drawings(
+#     payload: List[schemas.ProductDrawingCreate],
+#     db: Session = Depends(get_db),
+#     current_user: int = Depends(oauth2.get_current_user)
+# ):
+#     try:
+#         user.get_user_status(current_user)
+#         tenant.user_role_admin(current_user)
+#         tenant_id = current_user.tenant.id
+
+#         if not payload:
+#             raise HTTPException(status_code=400, detail="No drawings provided")
+
+#         # Convert payload to DataFrame
+#         df_payload = pd.DataFrame([p.model_dump() for p in payload])
+
+#         # Normalize drawing_no
+#         df_payload["drawing_no"] = df_payload["drawing_no"].str.strip().str.lower()
+
+#         # Drop duplicates within payload itself
+#         df_payload = df_payload.drop_duplicates(subset=["product_id", "drawing_no"])
+
+#         # Add audit columns
+#         df_payload["created_by"] = current_user.id
+#         df_payload["updated_by"] = current_user.id
+
+#         # Query existing ones from DB
+#         existing = (
+#         db.query(
+#         models.ProductDrawing.product_id,
+#         models.ProductDrawing.drawing_no
+#         )
+#         .join(models.Product, models.Product.id == models.ProductDrawing.product_id)
+#         .filter(
+#         models.Product.tenant_id == tenant_id,  # tenant scope
+#         tuple_(
+#             models.ProductDrawing.product_id,
+#             func.lower(func.trim(models.ProductDrawing.drawing_no))  # normalize
+#         ).in_([
+#             (p.product_id, p.drawing_no.strip().lower()) for p in payload
+#         ])
+#     )
+#     .distinct()
+#     .all()
+# )
+
+#         # Convert DB existing to DataFrame and normalize
+#         df_existing = pd.DataFrame(existing, columns=["product_id", "drawing_no"])
+#         if not df_existing.empty:
+#             df_existing["drawing_no"] = df_existing["drawing_no"].str.strip().str.lower()
+
+#         # Filter only new rows
+#         if not df_existing.empty:
+#             df_new = df_payload.merge(
+#                 df_existing, on=["product_id", "drawing_no"], how="left", indicator=True
+#             ).query('_merge == "left_only"').drop(columns=["_merge"])
+#         else:
+#             df_new = df_payload.copy()
+
+#         # Insert only if there are new records
+#         if not df_new.empty:
+#             db.bulk_insert_mappings(models.ProductDrawing, df_new.to_dict(orient="records"))
+#             db.commit()
+
+#         return {
+#             "created_count": len(df_new),
+#             "skipped_count": len(df_existing),
+#             "skipped": df_existing.to_dict(orient="records")
+#         }
+
+#     except HTTPException as he:
+#         raise he
+#     except SQLAlchemyError as e:
+#         db.rollback()
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail=f"Database error: {str(e)}"
+#         )
+#     except Exception as e:
+#         db.rollback()
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail=f"Internal server error: {str(e)}"
+#         )
 
 # @router.post("/drawings/bulk", response_model=List[schemas.ProductDrawingResponse], status_code=status.HTTP_201_CREATED)
 # def create_multiple_product_drawings(
@@ -455,8 +565,13 @@ def get_product_drawings(
 ):
     try:
         # user data
-        # tenant_id = current_user.tenant_id
-        drawings = db.query(models.ProductDrawing).filter(models.ProductDrawing.product_id == product_id).all()
+        tenant_id = current_user.tenant_id
+        # drawings = db.query(models.ProductDrawing).filter(models.ProductDrawing.product_id == product_id).all()
+        drawings = db.query(models.ProductDrawing).join(models.Product).filter(models.ProductDrawing.product_id == product_id,models.Product.tenant_id == current_user.tenant.id).all(
+            
+        )
+        if not drawings:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No drawings {product_id} found for this product ID for tenant {current_user.tenant.tenant_name}")
         return drawings
     except HTTPException as he:
         raise he
