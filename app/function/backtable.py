@@ -7,8 +7,17 @@ def getRoleBycode(role_code,db):
     role_code = role_code.lower()
     role_details = db.query(models.UserRole).filter(models.UserRole.user_role==role_code).first()
     if not role_details:
-      raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{role_code}, role detials not found.")
-    return role_details
+      raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{role_code}, no such role present not found.")
+    return role_details 
+
+
+
+
+
+
+
+
+    
   except HTTPException as he:
     raise he
   except SQLAlchemyError as e:

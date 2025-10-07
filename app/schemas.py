@@ -123,6 +123,7 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     role_id: Optional[int] = None
+    tenant_code: Optional[str] = None
     # user: UserOut
     
 

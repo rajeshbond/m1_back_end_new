@@ -28,7 +28,7 @@ def login(user_credentials:OAuth2PasswordRequestForm = Depends(), db: Session = 
         role = db.query(models.UserRole).filter(models.UserRole.id == user.role_id).first()
 
         tenant_details = db.query(models.Tenant).filter(models.Tenant.id == user.tenant_id).first()
-        # print(tenant_details.tenant_name)
+        # print(tenant_details.tenant_code)
         if not tenant_details:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,detail=f"No such tenant found")
         # print(tenant_details.is_active) # for debugginh purpose 
@@ -57,10 +57,8 @@ def login(user_credentials:OAuth2PasswordRequestForm = Depends(), db: Session = 
         
         # CREATE TOKEN 
         access_token= oauth2.create_access_token(data= {"user_id": user.id})
-        # print(f"User {user} logged in successfully")
-        # print(access_token)
-        # print(role.user_role)
-        return {"access_token":access_token, "token_type":"bearer", "role_id": user.role_id} 
+        
+        return {"access_token":access_token, "token_type":"bearer", "role_id": user.role_id,"tenant_code": tenant_details.tenant_code} 
     except HTTPException as he:
         raise he
     except SQLAlchemyError as e:
